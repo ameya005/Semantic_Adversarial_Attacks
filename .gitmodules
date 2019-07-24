@@ -1,0 +1,3 @@
+[submodule "FaderNetworks"]
+	path = FaderNetworks
+	url = https://github.com/ameya005/FaderNetworks.git 
