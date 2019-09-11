@@ -22,18 +22,22 @@ from torch.utils.data import DataLoader
 
 from AttGAN.attgan import Generator
 from simple_classifier import Classifier, restore_model
+from resnet import ResNet, get_data_loader
 from celebA_data_loader import _SORTED_ATTR, CelebA_Dataset
 from utils import get_logger
 from losses import nontarget_logit_loss
 
 import copy
 
+_BDD_ATTR = AVAILABLE_ATTR = ['Day', 'Night']
+
+
 class AttEncoderModule(nn.Module):
     """
     Class for constructing the attribute vector
     """
 
-    def __init__(self, alpha_init, attrib_flags, thresh_int, projection_step=False, eps=1.0):
+    def __init__(self, alpha_init, attrib_flags, thresh_int, projection_step=False, eps=1.0, sorted_attr=[]):
         super(AttEncoderModule, self).__init__()
         self.attr_a = alpha_init.clone()
         self.attr_b = alpha_init.clone()
@@ -41,7 +45,7 @@ class AttEncoderModule(nn.Module):
         self.indices = []
         self.thresh_int = thresh_int
         for i in attrib_flags:
-            idx = _SORTED_ATTR.index(i)
+            idx = sorted_attr.index(i)
             print(idx, alpha_init[idx])
             self.alpha.append(torch.tensor(1.0).requires_grad_(True))
             self.indices.append(idx)
@@ -77,18 +81,32 @@ class Attacker(nn.Module):
     def __init__(self, params, params_gen, input_logits):
         super(Attacker, self).__init__()
         self.params = params
-        self.target_model = Classifier(
-            (params.img_sz, params.img_sz, params.img_fm))
+        if self.params.dtype == 'celeba':
+            self.sorted_attr = _SORTED_ATTR
+        elif self.params.dtype == 'bdd':
+            self.sorted_attr = _BDD_ATTR
+        self.ctype = params.ctype
+        if self.ctype == 'simple':
+            self.target_model = Classifier(
+                (params.img_sz, params.img_sz, params.img_fm))
+        elif self.ctype == 'resnet':
+            self.target_model = ResNet()
+        else:
+            raise Exception('Unknown classfiier type : {}'.format(self.ctype))
         self.adv_generator = Generator(params_gen.enc_dim, params_gen.enc_layers, params_gen.enc_norm, params_gen.enc_acti,
                                        params_gen.dec_dim, params_gen.dec_layers, params_gen.dec_norm, params_gen.dec_acti,
                                        params_gen.n_attrs, params_gen.shortcut_layers, params_gen.inject_layers, params_gen.img_size)
+        
         self.eps = params.eps
         self.projection = params.proj_flag
         self.input_logits = torch.tensor(input_logits).requires_grad_(False)
-        self.attrib_gen = AttEncoderModule(self.input_logits, params.attk_attribs, params_gen.thres_int, self.projection, self.eps)
+        self.attrib_gen = AttEncoderModule(self.input_logits, params.attk_attribs, params_gen.thres_int, self.projection, self.eps, self.sorted_attr)
 
     def restore(self, legacy=False):
-        self.target_model.load_state_dict(torch.load(self.params.model))
+        if self.ctype == 'simple':
+            self.target_model.load_state_dict(torch.load(self.params.model))
+        else:
+            self.target_model.load_model(self.params.model)
         if legacy:
             old_model_state_dict = torch.load(self.params.fader)
             old_model_state_dict.update(_LEGACY_STATE_DICT_PATCH)
@@ -107,14 +125,20 @@ class Attacker(nn.Module):
         cl_label = self.target_model(recon)
         return recon, cl_label
 
-def get_data_loader(args, train, shuffle=True):
-    custom_transforms = transforms.Compose([transforms.CenterCrop(178),
-                                            transforms.Resize((256, 256)),
-                                            transforms.ToTensor(),
-                                            transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5))])
-    ds = CelebA_Dataset(args.attrib_path, args.data_dir, train,
-                        args.train_attribute, transform=custom_transforms, att_gan=True)
-    return DataLoader(ds, batch_size=args.batch_size, shuffle=shuffle)
+def get_dataset(args, train, shuffle=True):
+    if args.dtype == 'celeba':
+        custom_transforms = transforms.Compose([transforms.CenterCrop(178),
+                                                transforms.Resize((256, 256)),
+                                                transforms.ToTensor(),
+                                                transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5))])
+        ds = CelebA_Dataset(args.attrib_path, args.data_dir, train,
+                            args.train_attribute, transform=custom_transforms, att_gan=True)
+        dl = DataLoader(ds, batch_size=args.batch_size, shuffle=shuffle)
+    elif args.dtype == 'bdd':
+        dl = get_data_loader(args.data_dir, args.batch_size, mode='test')
+    else: 
+        raise Exception('Not implemented : {}'.format(args.dtype))
+    return dl
 
 def build_parser():
     parser = argparse.ArgumentParser()
@@ -130,8 +154,11 @@ def build_parser():
                         help='Path to attrib file', required=True)
     parser.add_argument('-t', '--type', help='Attack type: \n\t att: AttGAN based attack \n\t rn: Random attack',
                         choices=['att', 'rn'], default='fn')
+    parser.add_argument('-dt', '--dtype', help='Dataset type: \n\t celeba:CelebA \n\t bdd: Berkeley DeepDrive', choices=['celeba', 'bdd'], default='celeba')
+    parser.add_argument('-ct', '--ctype', help='Classifier Type: \n\t simple: Simple classifier \n\t resnet:Resnet type \nTemporary option!!', default='simple')
     parser.add_argument('--proj_flag', action='store_true', help='Infinity projection flag')
     parser.add_argument('--eps', help='Epsilon value', default=4.0, type=float)
+    parser.add_argument('--nclasses', '-n', help='No. of classes', default=2, type=int)
     parser.add_argument('--attk_attribs', nargs='+', help='Attributes to attack over')
     return parser
 
@@ -189,7 +216,8 @@ def attack_optim(img, model, attrib_tuple, device, logger):
     """
     MAX_ITER = 500
     step = 0
-    model.train()
+    #model.train()
+    model.eval()
     model = model.to(device)
     orig_img = img.cpu().detach().squeeze(0).numpy().transpose(1, 2, 0)
     img = img.to(device)
@@ -247,7 +275,7 @@ def main():
     # Minor bug with storing the model is creating this issue. Anyway, there is not much speedup with cuda
     device = torch.device('cpu')
     # Data Loader
-    loader = get_data_loader(args, train='test', shuffle=False)
+    loader = get_dataset(args, train='test', shuffle=False)
 
     cnt = 0
     f = open(os.path.join(args.outdir, 'vals.csv'), 'w')
