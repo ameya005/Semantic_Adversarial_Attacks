@@ -68,8 +68,8 @@ def attack_cw_l2(img, model, epsilon, device, logger):
     loss = nontarget_logit_loss(logits, torch.argmax(target))
     return success, out_img, np.float32([eps]), target.detach().cpu().numpy(), logits.detach().cpu().numpy(), loss.detach().cpu().numpy(), logits_array
 
-def nontarget_logit_loss(logit, label):
-    Y_ = torch.zeros(1, 2)  # Dummy vector for one-hot label vector. For multi-class, change this to # of classes
+def nontarget_logit_loss(logit, label, nclasses):
+    Y_ = torch.zeros(1, nclasses)  # Dummy vector for one-hot label vector. For multi-class, change this to # of classes
     Y_[0, label] = 1.0
     actual_logits = (Y_*logit).sum(1)
     nonactual_logits = ((1-Y_)*logit - Y_*10000).max(1)[0]

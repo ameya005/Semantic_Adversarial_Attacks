@@ -83,12 +83,16 @@ def make_weights_for_balanced_classes(images, nclasses):
 
 def get_data_loader(path, batch_size=16, mode='train'):
     path = os.path.join(path, mode)
-    transforms = tv.transforms.Compose([
-        tv.transforms.Resize(size=(128, 128)),
-        tv.transforms.RandomHorizontalFlip(p=0.5),
-        tv.transforms.ToTensor(),
-        tv.transforms.Normalize(mean=(0,0,0), std=(255., 255., 255.), inplace=True),
-    ])
+    if mode == 'train':
+        transforms = tv.transforms.Compose([
+            tv.transforms.Resize(size=(128, 128)),
+            tv.transforms.RandomHorizontalFlip(p=0.5),
+            tv.transforms.ToTensor(),
+            #tv.transforms.Normalize(mean=(0,0,0), std=(255., 255., 255.), inplace=True),
+        ])
+    else:
+        transforms = tv.transforms.Compose([tv.transforms.Resize(size=(128,128)), tv.transforms.ToTensor(), ])
+                                            #tv.transforms.Normalize(mean=(0,0,0), std=(255.0,255.,255.), inplace=True)])
     ds = ImageFolder(path, transform=transforms)
     if mode == 'train':
         weights = make_weights_for_balanced_classes(

@@ -28,7 +28,7 @@ class Generator(nn.Module):
         self.enc_layers = nn.ModuleList(layers)
         
         layers = []
-        n_in = n_in + n_attrs  # 1024 + 13
+        n_in = n_in + n_attrs  # 1024 + 13? 1
         for i in range(dec_layers):
             if i < dec_layers - 1:
                 n_out = min(dec_dim * 2**(dec_layers-i-1), MAX_DIM)

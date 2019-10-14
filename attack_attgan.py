@@ -29,7 +29,7 @@ from losses import nontarget_logit_loss
 
 import copy
 
-_BDD_ATTR = AVAILABLE_ATTR = ['Day', 'Night']
+_BDD_ATTR = AVAILABLE_ATTR = ['Daytime']
 
 
 class AttEncoderModule(nn.Module):
@@ -39,6 +39,7 @@ class AttEncoderModule(nn.Module):
 
     def __init__(self, alpha_init, attrib_flags, thresh_int, projection_step=False, eps=1.0, sorted_attr=[]):
         super(AttEncoderModule, self).__init__()
+        #print(alpha_init)
         self.attr_a = alpha_init.clone()
         self.attr_b = alpha_init.clone()
         self.alpha = []
@@ -51,6 +52,7 @@ class AttEncoderModule(nn.Module):
             self.indices.append(idx)
         for i in self.indices:
             self.attr_b[i] = 1 - self.attr_b[i]
+        #print(self.attr_b)
         self.eps = torch.tensor(eps)
 
     def get_optim_params(self):
@@ -62,8 +64,8 @@ class AttEncoderModule(nn.Module):
             attr_b[i] = (j * 2 -1) * self.thresh_int
         print('ATTR',attr_b)
         # Projection step
-        #attr_b = torch.min(attr_b, self.eps)
-        #attr_b = torch.max(attr_b, -self.eps)
+        attr_b = torch.min(attr_b, self.eps)
+        attr_b = torch.max(attr_b, torch.tensor(0.0))
 
         attr_b = attr_b.unsqueeze(0)
         return attr_b
@@ -96,10 +98,10 @@ class Attacker(nn.Module):
         self.adv_generator = Generator(params_gen.enc_dim, params_gen.enc_layers, params_gen.enc_norm, params_gen.enc_acti,
                                        params_gen.dec_dim, params_gen.dec_layers, params_gen.dec_norm, params_gen.dec_acti,
                                        params_gen.n_attrs, params_gen.shortcut_layers, params_gen.inject_layers, params_gen.img_size)
-        
         self.eps = params.eps
         self.projection = params.proj_flag
         self.input_logits = torch.tensor(input_logits).requires_grad_(False)
+        #print(self.input_logits)
         self.attrib_gen = AttEncoderModule(self.input_logits, params.attk_attribs, params_gen.thres_int, self.projection, self.eps, self.sorted_attr)
 
     def restore(self, legacy=False):
@@ -122,6 +124,8 @@ class Attacker(nn.Module):
             self.attrib_vec = attrib_vector
         l_z = self.adv_generator.encode(x)
         recon = self.adv_generator.decode(l_z, self.attrib_vec)
+        #print(recon.min(), recon.max())
+        recon = (recon - recon.min()) /  (recon.max() - recon.min())
         cl_label = self.target_model(recon)
         return recon, cl_label
 
@@ -208,7 +212,7 @@ def attack_random(img, model, num_samples, device, logger, eps):
         else:
             return FAILURE, out_img, alphas[worst_loss], orig_logits.detach().cpu().numpy(), worst_pred.detach().cpu().numpy()
 
-def attack_optim(img, model, attrib_tuple, device, logger):
+def attack_optim(img, model, attrib_tuple, nclasses, device, logger):
     """
     Optimizer based attack. 
     Runs a reverse gradient to find the value of alpha vector
@@ -225,33 +229,27 @@ def attack_optim(img, model, attrib_tuple, device, logger):
     labels = torch.argmax(orig_logits)
     SUCCESS = 1
     FAILURE = 0
-    optim = torch.optim.RMSprop(model.attrib_gen.get_optim_params(), lr=0.01, weight_decay=0.01)
+    optim = torch.optim.RMSprop(model.attrib_gen.get_optim_params(), lr=0.005, weight_decay=0.01)
     loss = np.inf
-    logit_arrays = [orig_logits.detach().cpu().numpy().tolist()]
-    prev_loss = 10000.0
-    pat_cnt = 0
     while loss != 0.0 and step < MAX_ITER:
         recon, logits = model(img)
-        logit_arrays.append(logits.detach().cpu().numpy().tolist())
+        #print(recon.min(), recon.max())
         pred = torch.argmax(logits)
         logger.debug('Modified label:%s, Orig label:%s', pred, labels)
-        loss = nontarget_logit_loss(logits, labels)
+        loss = nontarget_logit_loss(logits, labels, nclasses)
         if pred.cpu().detach().numpy() != labels.cpu().detach().numpy():
             out_img = np.hstack(
                 [orig_img, recon.cpu().detach().squeeze(0).numpy().transpose(1, 2, 0)])
             logger.info(
                 'Broken-Step:{}, alpha:{}'.format(step, model.attrib_vec))
             return SUCCESS, out_img, model.attrib_vec.cpu().detach().numpy(), orig_logits.detach().cpu().numpy(), logits.detach().cpu().numpy()
-        out_img = np.hstack(
-            [orig_img, recon.cpu().detach().squeeze(0).numpy().transpose(1, 2, 0)])
+        out_img = np.hstack([orig_img, recon.cpu().detach().squeeze(0).numpy().transpose(1, 2, 0)])
         optim.zero_grad()
         loss.backward()
         optim.step()
         logger.info('Step:{}, loss:{}, alpha:{}'.format(
             step, loss.detach().cpu().numpy(), model.attrib_vec.detach().cpu().numpy()[0].tolist()))
         step += 1
-        if loss.detach().cpu().numpy() - prev_loss < 0.1:
-            pat_cnt += 1
         
     return FAILURE, out_img, model.attrib_vec.cpu().detach().numpy(), orig_logits.detach().cpu().numpy(), logits.detach().cpu().numpy()
 
@@ -264,7 +262,7 @@ def main():
     args.logger = get_logger(args.outdir)
     args.gen = torch.load(args.attgan)
     args.train_attribute = _SORTED_ATTR
-    args.img_sz = 256
+    args.img_sz = 128
     args.img_fm = 3
 
     # ATTGAN weights
@@ -280,17 +278,32 @@ def main():
     cnt = 0
     f = open(os.path.join(args.outdir, 'vals.csv'), 'w')
     for input, label in tqdm(loader, total=len(loader)):
-        attacker = Attacker(args, args_gen, label).to(device)
+        #ii = input.cpu().detach().numpy()[0,...].transpose(1,2,0)
+        #print(ii.min(), ii.max())
+        #break
+        #plt.imshow(ii)
+        #plt.show()
+        if args.dtype == 'bdd':
+            inp_label = torch.tensor([1.0])
+        else:
+            inp_label = label
+        attacker = Attacker(args, args_gen, inp_label).to(device)
         attacker.restore()
         if cnt > 500:
             break
+        if args.dtype == 'bdd':
+            init_logit = [(-1.5, 1.75), (-2.0, 3.0)]
+        else:
+            init_logit = [(-1.5, 1.75), (-2.0, 3.0), (-6.0, 7.0)]
         if args.type == 'att':
             success, out_img, alpha, orig_logits, logits = attack_optim(
-                input, attacker, [(-1.5, 1.75), (-2, 3), (-6, 7)], device, args.logger)
+                input, attacker, init_logit, args.nclasses, device, args.logger)
         elif args.type == 'rn':
             success, out_img, alpha, orig_logits, logits = attack_random(
                 input, attacker, 10, device, args.logger, args.eps)
         if success:
+            orig_l = np.argmax(orig_logits[0,:])
+            new_l = np.argmax(logits[0,...])
             plt.imshow(out_img)
             plt.title('alpha:{}'.format(alpha))
             plt.savefig(os.path.join(
