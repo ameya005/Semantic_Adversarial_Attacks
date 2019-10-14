@@ -5,6 +5,7 @@ import torch
 import numpy as np
 from torch import nn
 
+
 def fgsm(model, x, target, eps, targeted=True, device=None, clip_min=None, clip_max=None):
     input = x.clone().detach_().to(device)
     input.requires_grad_()
@@ -68,10 +69,12 @@ def attack_cw_l2(img, model, epsilon, device, logger):
     loss = nontarget_logit_loss(logits, torch.argmax(target))
     return success, out_img, np.float32([eps]), target.detach().cpu().numpy(), logits.detach().cpu().numpy(), loss.detach().cpu().numpy(), logits_array
 
+
 def nontarget_logit_loss(logit, label, nclasses):
-    Y_ = torch.zeros(1, nclasses)  # Dummy vector for one-hot label vector. For multi-class, change this to # of classes
+    # Dummy vector for one-hot label vector. For multi-class, change this to # of classes
+    Y_ = torch.zeros(1, nclasses)
     Y_[0, label] = 1.0
     actual_logits = (Y_*logit).sum(1)
     nonactual_logits = ((1-Y_)*logit - Y_*10000).max(1)[0]
-    model_loss = torch.clamp(actual_logits - nonactual_logits, min=0.0).sum()
+    model_loss = torch.clampk(actual_logits - nonactual_logits, min=0.0).sum()
     return model_loss
